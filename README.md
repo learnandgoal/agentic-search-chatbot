@@ -71,9 +71,15 @@ It is `null` for text that came from `read`, `navigate` or `grep`.
 * **Model adapter.** Section 8 refers to "the existing GPT model adapter", which was not in the document. `hr_chatbot/llm.py` is the
   single seam: by default it builds `ChatOpenAI` (or Azure OpenAI when `AZURE_OPENAI_ENDPOINT` is set). Swap in your adapter there; it
   only needs to be a LangChain chat model that supports `bind_tools`.
-* **Evidence can't be invented.** Citations are checked in code: the chunk must have been retrieved this turn, belong to the selected
-  candidate/job, and contain the quoted text. File and page/section come from the index, not from the model. Failed citations are dropped
-  and the answer says how many.
+* **Evidence can't be invented, and `search` is never evidence.** Citations are checked in code (`graph.py`): the quoted text must
+  appear in text that `read`, `grep` or `navigate` returned this turn for that chunk, and the chunk must belong to the selected
+  candidate/job. `search` hits (snippets for locating) and `open` results (structure, no text) are returned with `citable: false` and
+  are rejected as evidence even if the quote is genuine. File and page/section come from the index, not from the model. Failed
+  citations are dropped and the answer says how many.
+* **Tool selection.** The system prompt (`prompts.py`) has a tool-selection section with query-to-tool examples: exact phrase ->
+  `search` then `grep`; adjacent information -> `search` then `navigate`; section summary -> `search`, `open`, then `read`;
+  simple fact -> `search` then `read`; unsupported request -> no retrieval tool. `open` shows structure only (no text) and is always
+  followed by `read` or `grep` when facts are needed.
 * **The model never picks the scope.** The selected candidate and job are injected into every tool call and every index query.
   Another candidate's documents are unreachable even if the model asks for them by id.
 * **`qa | unsupported` classification** (section 4.1) is a field on `submit_answer`, decided by the model under the rules in
@@ -96,8 +102,14 @@ It is `null` for text that came from `read`, `navigate` or `grep`.
 
 ## Tests
 
-`HR_EMBEDDER=hashing python -m pytest` runs 33 tests: parsing and metadata, incremental ingestion, scoped hybrid search, each tool's
-limits and scope checks, the graph with a scripted model (output contract, citation verification, budget enforcement, parallel and
-mixed tool calls, unsupported intent, multi-turn history) and a headless Streamlit run. They use a scripted chat model and a hashing
-embedder, so they need no API key or network. They do **not** exercise a real GPT model or the sentence-transformers model; run a
-real session with your key before relying on answer quality.
+`HR_EMBEDDER=hashing python -m pytest` runs 56 tests: parsing and metadata, incremental ingestion, scoped hybrid search, each tool's
+limits and scope checks, the graph with a scripted model (output contract, citation verification, citable-only evidence, budget
+enforcement, parallel and mixed tool calls, unsupported intent, multi-turn history), tool-trajectory tests (exact phrase, adjacent
+information, section summary, simple fact, unsupported -> no retrieval) and a headless Streamlit run. They use a scripted chat model
+and a hashing embedder, so they need no API key or network.
+
+The trajectory tests prove the application handles each trajectory correctly and rejects bad ones (for example answering from
+`search` alone). They cannot prove that a real model *chooses* those trajectories. For that there are 5 extra tests in
+`tests/test_trajectories_live.py`, skipped by default; run them with your credentials:
+`HR_LIVE_TESTS=1 HR_EMBEDDER=hashing python -m pytest tests/test_trajectories_live.py -v`.
+The sentence-transformers model is not exercised by any test; run a real session before relying on answer quality.

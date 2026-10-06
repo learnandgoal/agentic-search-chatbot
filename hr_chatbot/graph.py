@@ -5,7 +5,9 @@ START -> agent --(document tool calls)--> tools --> agent ... --(submit_answer)-
 * ``agent`` asks the model to either call a document tool or ``submit_answer`` (the structured final answer).
 * ``tools`` executes the document tools, appends results to ``retrieved_context`` and routes back.
 * The tool-call budget is enforced in code: once it is spent the model can only call ``submit_answer``.
-* Evidence is verified against the index before it is returned, so citations can't be invented.
+* Evidence is verified before it is returned, so citations can't be invented. A citation counts only if its quote
+  appears in text that ``read``, ``grep`` or ``navigate`` returned this turn (``search`` hits and ``open`` structure
+  are never evidence). This is enforced here in code, not only in the prompt.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from .config import Settings
 from .prompts import INITIAL_SUMMARY_PROMPT, build_system_prompt
 from .schemas import SUBMIT_NAME, EvidenceRef, SubmitAnswer
 from .store import HRStore, Scope
-from .tools import DOC_TOOL_SPECS, SUBMIT_TOOL, DocumentTools
+from .tools import CITABLE_TOOLS, DOC_TOOL_SPECS, SUBMIT_TOOL, DocumentTools
 
 log = logging.getLogger(__name__)
 
@@ -52,22 +54,32 @@ def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().lower()
 
 
+def citable_text(retrieved: list[dict]) -> dict[int, list[str]]:
+    """chunk_id -> the text read/grep/navigate actually returned for it this turn. search and open add nothing."""
+    shown: dict[int, list[str]] = {}
+    for item in retrieved:
+        if item.get("tool") in CITABLE_TOOLS:
+            shown.setdefault(item["chunk_id"], []).append(item["content"])
+    return shown
+
+
 def verify_evidence(
-    store: HRStore, scope: Scope, seen: set[int], refs: list[EvidenceRef]
+    store: HRStore, scope: Scope, shown: dict[int, list[str]], refs: list[EvidenceRef]
 ) -> tuple[list[dict], int]:
-    """Keep only citations whose chunk was retrieved this turn, is in scope, and really contains the quote.
+    """Keep only citations that (1) point at a chunk whose text came back from read, grep or navigate this turn,
+    (2) are in scope, and (3) quote text that was actually returned (``shown``), not merely text somewhere in the chunk.
     Provenance (file, page/section) comes from the index, never from the model."""
     verified: list[dict] = []
     dropped = 0
     used: set[tuple[int, str]] = set()
     for ref in refs:
-        chunk = store.get_chunk(ref.chunk_id) if ref.chunk_id in seen else None
+        chunk = store.get_chunk(ref.chunk_id) if ref.chunk_id in shown else None
         if chunk is None or not store.in_scope(chunk, scope):
             dropped += 1
             continue
-        haystack = _norm(chunk["text"])
+        haystacks = [_norm(text) for text in shown[ref.chunk_id]]
         parts = [p.strip() for p in re.split(r"\.{3}|…", _norm(ref.quote)) if len(p.strip()) >= 8]
-        if not parts or not all(p in haystack for p in parts):
+        if not parts or not any(all(p in h for p in parts) for h in haystacks):
             dropped += 1
             continue
         key = (chunk["chunk_id"], _norm(ref.quote))
@@ -118,7 +130,7 @@ def build_graph(store: HRStore, llm: BaseChatModel, settings: Settings):
 
     def _finalize(state: AgentState, scope: Scope, ai: AIMessage, submit: dict | None) -> dict[str, Any]:
         retrieved = state.get("retrieved_context", [])
-        seen = {c["chunk_id"] for c in retrieved}
+        shown = citable_text(retrieved)  # search hits and open results are deliberately not in here
         intent, response, evidence, dropped = "qa", "", [], 0
 
         if submit is not None:
@@ -130,7 +142,7 @@ def build_graph(store: HRStore, llm: BaseChatModel, settings: Settings):
             if answer is not None:
                 intent, response = answer.intent, answer.response.strip()
                 if intent == "qa":
-                    evidence, dropped = verify_evidence(store, scope, seen, answer.evidence)
+                    evidence, dropped = verify_evidence(store, scope, shown, answer.evidence)
         else:  # the model answered in plain text instead of calling submit_answer
             content = ai.content if isinstance(ai.content, str) else ""
             response = content.strip()
@@ -138,7 +150,10 @@ def build_graph(store: HRStore, llm: BaseChatModel, settings: Settings):
         if not response:
             response = FALLBACK_RESPONSE
         if dropped:
-            response += f"\n\n_Note: {dropped} citation(s) could not be verified against the documents and were omitted._"
+            response += (
+                f"\n\n_Note: {dropped} citation(s) could not be verified (evidence must quote text returned by "
+                "read, grep or navigate) and were omitted._"
+            )
 
         contract = {
             "session_id": state["session_id"],

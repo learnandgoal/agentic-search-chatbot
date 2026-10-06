@@ -52,8 +52,11 @@ class GrepArgs(BaseModel):
 
 
 class EvidenceRef(BaseModel):
-    chunk_id: int = Field(description="chunk_id of a chunk you retrieved.")
-    quote: str = Field(max_length=400, description="Short passage copied verbatim from that chunk that supports your answer.")
+    chunk_id: int = Field(description="chunk_id of a chunk whose text you received from read, grep or navigate (not search or open).")
+    quote: str = Field(
+        max_length=400,
+        description="Short passage copied verbatim from the text that read, grep or navigate returned for that chunk.",
+    )
 
 
 class SubmitAnswer(BaseModel):

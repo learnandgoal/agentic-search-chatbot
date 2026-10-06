@@ -14,9 +14,34 @@ def test_search_returns_compact_hits_and_context(store, settings, scope):
     r = tools(store, settings).call("search", {"query": "airflow orchestration"}, scope, set())
     assert r.ok and r.payload["hits"]
     hit = r.payload["hits"][0]
-    assert set(hit) == {"chunk_id", "document_id", "source_file", "source_type", "page_or_section", "score", "snippet"}
+    assert set(hit) == {
+        "chunk_id", "document_id", "source_file", "source_type", "page_or_section", "score", "snippet", "citable",
+    }
     assert len(hit["snippet"]) <= settings.snippet_chars
     assert r.context and r.context[0]["tool"] == "search" and r.context[0]["score"] is not None
+
+
+def test_search_hits_are_not_citable(store, settings, scope):
+    r = tools(store, settings).call("search", {"query": "airflow orchestration"}, scope, set())
+    assert r.payload["hits"] and all(h["citable"] is False for h in r.payload["hits"])
+    assert "not citable" in r.payload["note"]
+    assert all(c["citable"] is False for c in r.context)
+
+
+def test_only_text_returning_tools_are_citable(store, settings, scope):
+    from hr_chatbot.tools import CITABLE_TOOLS
+
+    assert CITABLE_TOOLS == {"navigate", "read", "grep"}
+    t = tools(store, settings)
+    chunk = next(c for c in store.document_chunks(RESUME) if c["page_or_section"] == "Page 1 - Summary")
+    calls = {
+        "navigate": {"chunk_id": chunk["chunk_id"], "direction": "next"},
+        "read": {"chunk_id": chunk["chunk_id"]},
+        "grep": {"document_id": RESUME, "pattern": "Python"},
+    }
+    for name, args in calls.items():
+        r = t.call(name, args, scope, set())
+        assert r.payload["citable"] is True and r.context and all(c["citable"] for c in r.context), name
 
 
 def test_search_excludes_previously_seen(store, settings, scope):
@@ -33,6 +58,15 @@ def test_open_lists_sections_without_adding_context(store, settings, scope):
     labels = [s["page_or_section"] for s in r.payload["sections"]]
     assert labels[:3] == ["Page 1 - Jordan Ellis", "Page 1 - Summary", "Page 1 - Experience"]
     assert r.context == []
+
+
+def test_open_is_structure_only(store, settings, scope):
+    r = tools(store, settings).call("open", {"document_id": RESUME}, scope, set())
+    assert r.payload["citable"] is False and "read" in r.payload["note"]
+    for section in r.payload["sections"]:
+        assert set(section) == {"page_or_section", "first_chunk_id", "last_chunk_id", "num_chunks"}  # no text/preview
+    document_text = " ".join(c["text"] for c in store.document_chunks(RESUME))
+    assert not any(line.strip()[:30] in str(r.payload) for line in document_text.splitlines() if len(line.strip()) > 30)
 
 
 def test_navigate_moves_within_bounds(store, settings, scope):

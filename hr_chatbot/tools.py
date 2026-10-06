@@ -1,6 +1,8 @@
 """The five Mistral-style document tools: search, open, navigate, read, grep.
 
-Division of labour (as in the design): ``search`` *locates* (compact hits), the other four *explore*.
+Division of labour (as in the design): ``search`` *locates* (compact hits), ``open`` shows *structure*, and
+``navigate`` / ``read`` / ``grep`` return the *text* that answers may be based on.
+Only text returned by CITABLE_TOOLS can be cited as evidence; the graph enforces this in code.
 Tools never raise to the model: problems come back as ``{"error": ...}`` so the agent can recover.
 The scope (candidate_id, job_id) is injected by the application, never chosen by the model.
 """
@@ -23,6 +25,10 @@ from .store import HRStore, Scope, snippet
 
 NOT_FOUND = "Unknown document_id/chunk_id for the selected candidate and job. Use ids returned by search."
 
+# Evidence may only quote text that one of these tools returned. search (snippets for locating) and
+# open (structure, no text) are deliberately excluded.
+CITABLE_TOOLS = frozenset({"navigate", "read", "grep"})
+
 
 @dataclass
 class ToolResult:
@@ -42,6 +48,7 @@ def _ctx(row: dict, content: str, tool: str, score: float | None = None) -> dict
         "content": content,
         "score": score,
         "tool": tool,
+        "citable": tool in CITABLE_TOOLS,
     }
 
 
@@ -81,10 +88,13 @@ class DocumentTools:
     def search(self, a: SearchArgs, scope: Scope, seen: set[int]) -> ToolResult:
         hits = self.store.search(scope, a.query, a.top_k, set(a.exclude_ids) | seen)
         payload: dict[str, Any] = {
-            "hits": [{k: v for k, v in h.items() if k != "text"} for h in hits],
+            # citable=False on every hit: snippets only say WHERE to look. Verify with read, grep or navigate.
+            "hits": [{**{k: v for k, v in h.items() if k != "text"}, "citable": False} for h in hits],
             "excluded_previously_seen": len(seen),
         }
-        if not hits:
+        if hits:
+            payload["note"] = "Search hits are not citable. Use read, grep or navigate on them to get citable text."
+        else:
             payload["note"] = (
                 "No new matching chunks. Try different terms, or stop and state that the documents do not contain it."
             )
@@ -107,7 +117,6 @@ class DocumentTools:
                         "first_chunk_id": chunk["chunk_id"],
                         "last_chunk_id": chunk["chunk_id"],
                         "num_chunks": 1,
-                        "preview": snippet(chunk["text"], 120),
                     }
                 )
         return ToolResult(
@@ -117,8 +126,11 @@ class DocumentTools:
                 "source_type": doc["source_type"],
                 "num_chunks": doc["num_chunks"],
                 "sections": sections,
+                "citable": False,
+                "note": "Structure only, no document text. To get facts, read a section "
+                "(document_id + page_or_section) or grep this document.",
             }
-        )  # structure only: nothing here counts as retrieved context
+        )  # structure only: no text, so nothing here counts as retrieved context
 
     # ---------------------------------------------------------------- navigate
     def navigate(self, a: NavigateArgs, scope: Scope, seen: set[int]) -> ToolResult:
@@ -152,7 +164,9 @@ class DocumentTools:
             }
             for t in targets
         ]
-        payload: dict[str, Any] = {"from_chunk_id": origin["chunk_id"], "direction": a.direction, "results": results}
+        payload: dict[str, Any] = {
+            "from_chunk_id": origin["chunk_id"], "direction": a.direction, "results": results, "citable": True,
+        }
         if not results:
             payload["boundary"] = "Already at the edge of this document; nothing further in that direction."
         return ToolResult(payload, [_ctx(t, snippet(t["text"], limit), "navigate") for t in targets])
@@ -201,6 +215,7 @@ class DocumentTools:
             "chunks": out_chunks,
             "truncated": truncated,
             "next_chunk_id": all_ids[after_idx] if after_idx < len(all_ids) else None,
+            "citable": True,
         }
         by_id = {c["chunk_id"]: c for c in window}
         return ToolResult(payload, [_ctx(by_id[o["chunk_id"]], o["text"], "read") for o in out_chunks])
@@ -242,7 +257,10 @@ class DocumentTools:
                 context.append(_ctx(chunk, around, "grep"))
             if truncated:
                 break
-        payload: dict[str, Any] = {"document_id": doc["document_id"], "pattern": pattern, "matches": matches, "truncated": truncated}
+        payload: dict[str, Any] = {
+            "document_id": doc["document_id"], "pattern": pattern, "matches": matches, "truncated": truncated,
+            "citable": True,
+        }
         if not matches:
             payload["note"] = "No occurrences in this document."
         return ToolResult(payload, context)
@@ -261,31 +279,34 @@ def _spec(name: str, description: str, schema: type) -> StructuredTool:
 DOC_TOOL_SPECS = [
     _spec(
         "search",
-        "Find where relevant information lives across the selected candidate's and job's documents. Hybrid keyword + "
-        "semantic retrieval. Returns compact hits (chunk_id, document_id, source_file, page_or_section, score, short "
-        "snippet), not full text. Follow up with open/navigate/read/grep to verify details.",
+        "LOCATE where relevant information lives across the selected candidate's and job's documents (hybrid keyword + "
+        "semantic). Returns compact hits (chunk_id, document_id, source_file, page_or_section, score, short snippet). "
+        "Hits are NOT citable evidence: always follow up with read, grep or navigate before stating a fact.",
         SearchArgs,
     ),
     _spec(
         "open",
-        "Inspect one document found via search: its sections/pages with chunk id ranges and a short preview of each.",
+        "Show the STRUCTURE of one document found via search: its pages/sections with chunk id ranges. Returns no "
+        "document text and is NOT citable. When you need factual content, always follow open with read (a section) "
+        "or grep.",
         OpenArgs,
     ),
     _spec(
         "navigate",
-        "Move to neighbouring chunks (next/previous) or sections (next_section/previous_section) around a known "
-        "chunk_id without running a new search.",
+        "Move to the chunks or sections next to a chunk you already found (next/previous, next_section/"
+        "previous_section) without running a new search. Use it for adjacent information. Citable.",
         NavigateArgs,
     ),
     _spec(
         "read",
-        "Read a larger range of full text: a chunk with neighbours, or a whole page/section of one document. "
-        "Output is size-limited and keeps chunk_id/section metadata for citation.",
+        "Read full text: one chunk with neighbours, or a whole page/section of one document. Use it for summaries and "
+        "simple facts. Output is size-limited and keeps chunk_id/section metadata. Citable.",
         ReadArgs,
     ),
     _spec(
         "grep",
-        "Find exact words or phrases (skills, employers, dates, certifications) inside ONE document, with context.",
+        "Find an exact word or phrase (skills, employers, dates, certifications) inside ONE document, with context. "
+        "Use it for exact-term questions. Citable.",
         GrepArgs,
     ),
 ]
@@ -293,6 +314,7 @@ DOC_TOOL_SPECS = [
 SUBMIT_TOOL = _spec(
     SUBMIT_NAME,
     "Deliver your final answer to the recruiter. Call this exactly once, on its own, when you have enough evidence "
-    "(or when no further search is likely to help, or the tool budget is used up).",
+    "(or when no further search is likely to help, or the tool budget is used up). Evidence may only quote text "
+    "returned by read, grep or navigate; citations of search hits or open results are discarded.",
     SubmitAnswer,
 )

@@ -84,10 +84,80 @@ def test_fabricated_and_foreign_citations_are_dropped(env, settings):
     assert "3 citation(s) could not be verified" in out["response"]
 
 
+RESUME_DOC = "candidates/candidate-001/resume.pdf"
+
+
+def read_script(quote):
+    """search (to locate) -> read the Experience section -> cite a quote from the text read returned."""
+    def script(messages, tools, tool_choice, n):
+        if n == 1:
+            return ai(call("search", "c1", query="kafka streaming pipelines"))
+        if n == 2:
+            return ai(call("read", "c2", document_id=RESUME_DOC, page_or_section="Page 1 - Experience"))
+        chunk = last_tool_json(messages)["chunks"][0]
+        return ai(call("submit_answer", "c3", intent="qa", response="Answer.",
+                       evidence=[{"chunk_id": chunk["chunk_id"], "quote": quote}]))
+    return script
+
+
 def test_quote_with_ellipsis_and_whitespace_differences_is_accepted(env, settings):
     quote = "Designed a Kafka and Spark   Structured Streaming ... reducing end-to-end latency"
-    out = make_session(env, settings, happy_script(quote))[0].start().output
+    out = make_session(env, settings, read_script(quote))[0].start().output
     assert len(out["source_evidence"]) == 1
+
+
+def test_search_snippets_cannot_be_cited_even_when_the_quote_is_real(env, settings):
+    def script(messages, tools, tool_choice, n):
+        if n == 1:
+            return ai(call("search", "c1", query="kafka streaming pipelines"))
+        hit = last_tool_json(messages)["hits"][0]
+        assert hit["citable"] is False
+        return ai(call("submit_answer", "c2", intent="qa", response="Answer.",
+                       evidence=[{"chunk_id": hit["chunk_id"], "quote": hit["snippet"][:40]}]))  # genuine text, wrong source
+
+    out = make_session(env, settings, script)[0].start().output
+    assert out["source_evidence"] == []
+    assert "1 citation(s) could not be verified" in out["response"] and "read, grep or navigate" in out["response"]
+
+
+def test_open_results_cannot_be_cited(env, settings):
+    store, _ = env
+
+    def script(messages, tools, tool_choice, n):
+        if n == 1:
+            return ai(call("open", "c1", document_id=RESUME_DOC))
+        first = last_tool_json(messages)["sections"][0]["first_chunk_id"]
+        real = store.get_chunk(first)["text"][:30]
+        return ai(call("submit_answer", "c2", intent="qa", response="Answer.",
+                       evidence=[{"chunk_id": first, "quote": real}]))
+
+    out = make_session(env, settings, script)[0].start().output
+    assert out["source_evidence"] == [] and "1 citation(s)" in out["response"]
+
+
+def test_quote_must_come_from_text_that_was_actually_shown(env, settings):
+    # the text exists in the chunk, but grep's 80-character window never showed it to the model
+    outside_window = "latency from 15 minutes to 40 seconds"
+    shown = make_session(env, settings, happy_script(outside_window))[0].start().output
+    assert shown["source_evidence"] == []
+    read = make_session(env, settings, read_script(outside_window))[0].start().output  # read returns the whole chunk
+    assert len(read["source_evidence"]) == 1
+
+
+def test_navigate_text_can_be_cited(env, settings):
+    store, _ = env
+    summary = next(c for c in store.document_chunks(RESUME_DOC) if c["page_or_section"] == "Page 1 - Summary")
+
+    def script(messages, tools, tool_choice, n):
+        if n == 1:
+            return ai(call("navigate", "c1", chunk_id=summary["chunk_id"], direction="next"))
+        result = last_tool_json(messages)["results"][0]
+        return ai(call("submit_answer", "c2", intent="qa", response="Answer.",
+                       evidence=[{"chunk_id": result["chunk_id"], "quote": result["snippet"][:50]}]))
+
+    out = make_session(env, settings, script)[0].start().output
+    assert len(out["source_evidence"]) == 1
+    assert out["source_evidence"][0]["page_or_section"] == "Page 1 - Experience"
 
 
 def test_tool_budget_is_enforced_then_answer_is_forced(env, settings):
