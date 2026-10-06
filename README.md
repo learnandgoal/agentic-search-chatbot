@@ -12,13 +12,19 @@ local SQLite index, and every answer returns **source evidence** and the **retri
 ```bash
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env                                   # then put your OPENAI_API_KEY in it
+cp .env.example .env                                   # then fill in your Azure (or OpenAI) settings
 python -m hr_chatbot.sample_data                       # optional: only if ./data is missing (it is included)
 streamlit run app.py
 ```
 
-The first start downloads the local embedding model (`all-MiniLM-L6-v2`, ~90 MB). No API key and no download are needed to
-run the tests: `HR_EMBEDDER=hashing python -m pytest`.
+**Azure OpenAI for chat and embeddings.** Set `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY` and `AZURE_OPENAI_DEPLOYMENT` (your chat
+deployment, e.g. a gpt-4.1-mini deployment). That one endpoint variable also switches the embeddings to Azure, using your
+`AZURE_OPENAI_EMBEDDING_DEPLOYMENT` (default name `text-embedding-3-large`, 3072 dimensions; set
+`AZURE_OPENAI_EMBEDDING_DIMENSIONS` for shorter vectors). The vector size is read from the first API response, so the index always
+matches the deployment. **An index is tied to the embedder that built it**: after switching embedder, deployment or dimensions, run
+`python -m hr_chatbot.ingest --rebuild` once. The app refuses to open a mismatched index instead of mixing vector spaces.
+Without Azure, embeddings default to a local model (`all-MiniLM-L6-v2`, ~90 MB download on first start). No API key and no
+download are needed to run the tests: `HR_EMBEDDER=hashing python -m pytest`.
 
 Your own data goes in the folder layout from section 3 of the design (IDs come straight from the folder names):
 
@@ -30,7 +36,7 @@ data/indexes/hr.sqlite                                                        (c
 
 Index maintenance: at startup only the existing index is loaded. **Start Chat** refreshes just the selected candidate's and job's
 files whose content hash changed or that are missing from the index (and prunes deleted files). To index everything up front:
-`python -m hr_chatbot.ingest` (add `--rebuild` after changing the embedding model).
+`python -m hr_chatbot.ingest` (add `--rebuild` after changing the embedding model, deployment or dimensions).
 
 ## How the design maps to the code
 
@@ -102,7 +108,8 @@ It is `null` for text that came from `read`, `navigate` or `grep`.
 
 ## Tests
 
-`HR_EMBEDDER=hashing python -m pytest` runs 56 tests: parsing and metadata, incremental ingestion, scoped hybrid search, each tool's
+`HR_EMBEDDER=hashing python -m pytest` runs 66 tests: parsing and metadata, incremental ingestion, scoped hybrid search, the Azure
+embedder (with a mocked client), each tool's
 limits and scope checks, the graph with a scripted model (output contract, citation verification, citable-only evidence, budget
 enforcement, parallel and mixed tool calls, unsupported intent, multi-turn history), tool-trajectory tests (exact phrase, adjacent
 information, section summary, simple fact, unsupported -> no retrieval) and a headless Streamlit run. They use a scripted chat model
@@ -112,4 +119,5 @@ The trajectory tests prove the application handles each trajectory correctly and
 `search` alone). They cannot prove that a real model *chooses* those trajectories. For that there are 5 extra tests in
 `tests/test_trajectories_live.py`, skipped by default; run them with your credentials:
 `HR_LIVE_TESTS=1 HR_EMBEDDER=hashing python -m pytest tests/test_trajectories_live.py -v`.
-The sentence-transformers model is not exercised by any test; run a real session before relying on answer quality.
+The Azure embedder is tested against a mocked client only, and the sentence-transformers model is not exercised by any test;
+run a real session against your Azure resources before relying on retrieval quality.
