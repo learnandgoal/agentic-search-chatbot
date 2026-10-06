@@ -30,7 +30,7 @@ class Settings:
     # Tool limits
     max_top_k: int = 10
     snippet_chars: int = 240
-    navigate_snippet_chars: int = 400
+    navigate_snippet_chars: int = 1000
     read_default_chars: int = 3000
     read_max_chars: int = 6000
     grep_max_results: int = 20

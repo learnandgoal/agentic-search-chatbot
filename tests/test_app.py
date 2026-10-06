@@ -38,8 +38,8 @@ def app(tmp_path, monkeypatch):
 
 def test_dropdowns_start_chat_and_follow_up(app):
     at = app
-    assert [o for o in at.sidebar.selectbox[0].options] == ["candidate-001", "candidate-002"]
-    assert [o for o in at.sidebar.selectbox[1].options] == ["job-001", "job-002"]
+    assert [o for o in at.sidebar.selectbox[0].options] == ["candidate-001", "candidate-002", "candidate-003", "candidate-004"]
+    assert [o for o in at.sidebar.selectbox[1].options] == ["job-001", "job-002", "job-003"]
     assert not at.chat_message  # nothing until Start Chat
 
     at.sidebar.selectbox[0].select("candidate-002")

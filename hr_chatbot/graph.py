@@ -177,8 +177,9 @@ def build_graph(store: HRStore, llm: BaseChatModel, settings: Settings):
         executed = len(state.get("tool_calls", []))
         existing = state.get("retrieved_context", [])
         seen = {c["chunk_id"] for c in existing}
-        known = {(c["chunk_id"], c["content"]) for c in existing}
+        known = {(c["chunk_id"], c["content"], c.get("tool")) for c in existing}  # tool matters: a read of a short chunk equals its search snippet but is citable
 
+        done = {json.dumps([c["name"], c["args"]], sort_keys=True, default=str) for c in state.get("tool_calls", [])}
         replies: list[ToolMessage] = []
         new_context: list[dict] = []
         new_calls: list[dict] = []
@@ -196,10 +197,18 @@ def build_graph(store: HRStore, llm: BaseChatModel, settings: Settings):
                 reply(call, {"error": "Tool-call budget exhausted. Call submit_answer with what you have."})
                 continue
 
-            result = tools.call(call["name"], call.get("args") or {}, scope, seen)
+            args = call.get("args") or {}
+            signature = json.dumps([call["name"], args], sort_keys=True, default=str)
+            if signature in done:  # same tool, same arguments: the earlier result is still in the conversation
+                new_calls.append({"name": call["name"], "args": args, "ok": False, "results": 0, "duplicate": True})
+                reply(call, {"error": "Duplicate call: identical arguments were already used this turn and its result is above. "
+                                      "Use that result, or call a different tool, or call submit_answer."})
+                continue
+            done.add(signature)
+            result = tools.call(call["name"], args, scope, seen)
             new_calls.append({"name": call["name"], "args": call.get("args") or {}, "ok": result.ok, "results": len(result.context)})
             for item in result.context:
-                key = (item["chunk_id"], item["content"])
+                key = (item["chunk_id"], item["content"], item.get("tool"))
                 if key not in known:
                     known.add(key)
                     new_context.append(item)

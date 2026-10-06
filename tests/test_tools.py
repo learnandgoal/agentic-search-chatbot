@@ -86,8 +86,8 @@ def test_navigate_moves_within_bounds(store, settings, scope):
 
 def test_read_by_section_and_by_chunk_with_limits(store, settings, scope):
     t = tools(store, settings)
-    section = t.call("read", {"document_id": RESUME, "page_or_section": "page 2 - experience"}, scope, set())
-    assert "Contoso" in section.payload["chunks"][0]["text"] and not section.payload["truncated"]
+    section = t.call("read", {"document_id": RESUME, "page_or_section": "page 1 - experience"}, scope, set())
+    assert "Contoso" in " ".join(c["text"] for c in section.payload["chunks"]) and not section.payload["truncated"]
     chunk = next(c for c in store.document_chunks(RESUME) if c["page_or_section"] == "Page 1 - Experience")
     tiny = t.call("read", {"chunk_id": chunk["chunk_id"], "max_chars": 200}, scope, set())
     assert tiny.payload["truncated"] and len(tiny.payload["chunks"][0]["text"]) <= 201
@@ -134,3 +134,10 @@ def test_bad_calls_return_errors_instead_of_raising(store, settings, scope):
     assert not t.call("delete_everything", {}, scope, set()).ok
     assert not t.call("search", {"query": ""}, scope, set()).ok
     assert not t.call("open", {}, scope, set()).ok
+
+
+def test_read_falls_back_to_the_section_when_a_placeholder_chunk_id_is_sent(store, settings, scope):
+    t = tools(store, settings)
+    r = t.call("read", {"chunk_id": 0, "document_id": RESUME, "page_or_section": "Page 1 - Summary"}, scope, set())
+    assert r.ok and r.payload["chunks"][0]["page_or_section"] == "Page 1 - Summary"
+    assert t.call("read", {"chunk_id": 0}, scope, set()).payload["error"]  # no fallback available: still an error

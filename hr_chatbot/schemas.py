@@ -29,7 +29,7 @@ class NavigateArgs(BaseModel):
 
 
 class ReadArgs(BaseModel):
-    chunk_id: int | None = Field(default=None, description="Read this chunk plus `before`/`after` neighbours.")
+    chunk_id: int | None = Field(default=None, description="A chunk_id returned by search/grep/navigate/open (never a guess or 0). Reads this chunk plus `before`/`after` neighbours. Use this OR document_id+page_or_section, not both.")
     document_id: str | None = Field(default=None, description="Use with page_or_section to read a whole page or section.")
     page_or_section: str | None = Field(default=None, description="Exact label as shown by open/search, e.g. 'Page 2 - Experience'.")
     before: int = Field(default=0, ge=0, description="Neighbouring chunks before chunk_id (max 5).")

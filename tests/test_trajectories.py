@@ -21,7 +21,7 @@ def test_golden_trajectory_is_accepted_and_yields_verified_evidence(env, setting
     names = [t["name"] for t in turn.trace]
 
     assert names == list(scenario.golden)
-    assert check_trajectory(scenario, names) == []
+    assert check_trajectory(scenario, names, turn.trace) == []
     assert all(t["ok"] for t in turn.trace)
 
     out = turn.output
@@ -44,8 +44,8 @@ def test_exact_phrase_cites_the_grep_match(env, settings):
 def test_adjacent_information_cites_the_neighbouring_section(env, settings):
     scenario = BY_NAME["adjacent_information"]
     out = make_session(env, settings, golden_script(scenario, env[0])).ask(scenario.question).output
-    assert out["source_evidence"][0]["page_or_section"] == "Page 2 - Experience"
-    assert "Contoso" in out["source_evidence"][0]["content"]
+    assert out["source_evidence"][0]["page_or_section"] == "Page 1 - Experience"
+    assert out["source_evidence"][0]["source_file"] == "resume.pdf" and out["source_evidence"][0]["content"].strip()
 
 
 def test_section_summary_cites_the_section_text_that_was_read(env, settings):
@@ -113,8 +113,10 @@ def test_prompt_has_query_to_tool_examples_for_every_question_type():
     assert "open" in summary and "read" in summary and summary.index("open") < summary.index("read")
     fact = line_starting("- Simple fact")
     assert "read" in fact and "snippet alone" in fact
-    unsupported = line_starting("- Unsupported")
-    assert "NO retrieval tool" in unsupported and '"unsupported"' in unsupported
+    step0 = line_starting("- Unsupported request (")
+    assert "FIRST and only call is submit_answer" in step0 and '"unsupported"' in step0 and "Do not search first" in step0
+    assert "no retrieval tool" in line_starting("- Unsupported request ->")
+    assert "GREP" in exact and "not read" in exact and "do not read it again" in adjacent
 
 
 def test_prompt_says_open_is_structure_only_and_search_is_not_citable():
@@ -131,3 +133,15 @@ def test_tool_descriptions_match_the_prompt():
     assert "STRUCTURE" in desc["open"] and "NOT citable" in desc["open"] and "follow open with read" in desc["open"]
     for name in ("navigate", "read", "grep"):
         assert desc[name].rstrip().endswith("Citable."), name
+
+
+def test_checker_flags_wasteful_trajectories():
+    scenario = BY_NAME["simple_fact"]
+    wandering = ["search", "search", "open", "read", "grep"]
+    assert any("wasteful" in p for p in check_trajectory(scenario, wandering))
+    trace = [{"name": "search", "args": {"query": "x"}, "ok": True}, {"name": "search", "args": {"query": "x"}, "ok": True},
+             {"name": "read", "args": {"chunk_id": 1}, "ok": False}]
+    problems = check_trajectory(scenario, ["search", "search", "read"], trace)
+    assert any("repeated identical call" in p for p in problems) and any("failed" in p for p in problems)
+    clean = [{"name": "search", "args": {"query": "x"}, "ok": True}, {"name": "read", "args": {"chunk_id": 1}, "ok": True}]
+    assert check_trajectory(scenario, ["search", "read"], clean) == []

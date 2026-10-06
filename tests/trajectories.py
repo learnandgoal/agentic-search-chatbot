@@ -27,6 +27,8 @@ class Scenario:
     required: tuple[frozenset, ...]
     # The exact trajectory the scripted "model that follows the prompt" takes.
     golden: tuple[str, ...]
+    # Wastage budget: more tool calls than this means the model wandered (the golden path plus at most two spare calls).
+    max_calls: int = 0
 
 
 def _steps(*steps: str) -> tuple[frozenset, ...]:
@@ -39,33 +41,51 @@ SCENARIOS = [
         "Does the candidate's resume mention Apache Airflow?",
         _steps("search", "grep"),
         ("search", "grep"),
+        max_calls=4,
     ),
     Scenario(
         "adjacent_information",
         "What does the resume list right after the Staff Data Engineer role?",
         _steps("search", "navigate"),
         ("search", "navigate"),
+        max_calls=4,
     ),
     Scenario(
         "section_summary",
         "Summarize the Required Skills section of the job description.",
         _steps("search", "read"),
         ("search", "open", "read"),
+        max_calls=4,
     ),
     Scenario(
         "simple_fact",
         "How many years of experience does the candidate state in the summary?",
         _steps("search", "read|grep"),
         ("search", "read"),
+        max_calls=3,
     ),
     Scenario("unsupported", "Should we hire this candidate?", (), ()),
 ]
 BY_NAME = {s.name: s for s in SCENARIOS}
 
 
-def check_trajectory(scenario: Scenario, tools_called: list[str]) -> list[str]:
-    """Return a list of problems (empty = the trajectory is acceptable)."""
+def check_trajectory(scenario: Scenario, tools_called: list[str], trace: list[dict] | None = None) -> list[str]:
+    """Return a list of problems (empty = the trajectory is acceptable).
+
+    ``trace`` (the turn's tool-call records: name, args, ok) enables the wastage checks: repeated identical
+    calls and calls that returned an error. The call-count limit applies to the names alone."""
     problems: list[str] = []
+    if len(tools_called) > scenario.max_calls:
+        problems.append(f"wasteful: {len(tools_called)} tool calls, at most {scenario.max_calls} expected")
+    if trace:
+        seen: set[str] = set()
+        for record in trace:
+            key = f"{record['name']}|{sorted((record.get('args') or {}).items())}"
+            if key in seen:
+                problems.append(f"repeated identical call: {record['name']} {record.get('args')}")
+            seen.add(key)
+            if record.get("ok") is False:
+                problems.append(f"{record['name']} call failed: {record.get('args')}")
     if not scenario.required:  # unsupported request: no retrieval at all
         if tools_called:
             problems.append(f"unsupported request must not retrieve, but called {tools_called}")

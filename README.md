@@ -23,10 +23,10 @@ deployment, e.g. a gpt-4.1-mini deployment). That one endpoint variable also swi
 `AZURE_OPENAI_EMBEDDING_DIMENSIONS` for shorter vectors). The vector size is read from the first API response, so the index always
 matches the deployment. **An index is tied to the embedder that built it**: after switching embedder, deployment or dimensions, run
 `python -m hr_chatbot.ingest --rebuild` once. The app refuses to open a mismatched index instead of mixing vector spaces.
-Without Azure, embeddings default to a local model (`all-MiniLM-L6-v2`, ~90 MB download on first start). No API key and no
+For testing without Azure, `HR_EMBEDDER=openai` uses `OPENAI_API_KEY` (and `OPENAI_BASE_URL`, e.g. OpenRouter) with `OPENAI_EMBEDDING_MODEL` (default `text-embedding-3-large`). Without Azure or this setting, embeddings default to a local model (`all-MiniLM-L6-v2`, ~90 MB download on first start). No API key and no
 download are needed to run the tests: `HR_EMBEDDER=hashing python -m pytest`.
 
-Your own data goes in the folder layout from section 3 of the design (IDs come straight from the folder names):
+Your own data goes in the folder layout from section 3 of the design (IDs come straight from the folder names). The included sample data is 4 candidates (PDF and DOCX resumes, cover letters, a portfolio, one cover letter with a prompt-injection paragraph) and 3 detailed job descriptions:
 
 ```
 data/candidates/<candidate-id>/resume.pdf, cover-letter.docx, portfolio.pdf   (PDF and DOCX only)
@@ -108,16 +108,35 @@ It is `null` for text that came from `read`, `navigate` or `grep`.
 
 ## Tests
 
-`HR_EMBEDDER=hashing python -m pytest` runs 66 tests: parsing and metadata, incremental ingestion, scoped hybrid search, the Azure
+`HR_EMBEDDER=hashing python -m pytest` runs 76 tests: parsing and metadata, incremental ingestion, scoped hybrid search, the Azure
 embedder (with a mocked client), each tool's
 limits and scope checks, the graph with a scripted model (output contract, citation verification, citable-only evidence, budget
 enforcement, parallel and mixed tool calls, unsupported intent, multi-turn history), tool-trajectory tests (exact phrase, adjacent
-information, section summary, simple fact, unsupported -> no retrieval) and a headless Streamlit run. They use a scripted chat model
+information, section summary, simple fact, unsupported -> no retrieval, including wastage limits: call budget, no repeated calls, no failed calls) and a headless Streamlit run. They use a scripted chat model
 and a hashing embedder, so they need no API key or network.
 
 The trajectory tests prove the application handles each trajectory correctly and rejects bad ones (for example answering from
 `search` alone). They cannot prove that a real model *chooses* those trajectories. For that there are 5 extra tests in
 `tests/test_trajectories_live.py`, skipped by default; run them with your credentials:
-`HR_LIVE_TESTS=1 HR_EMBEDDER=hashing python -m pytest tests/test_trajectories_live.py -v`.
+`HR_LIVE_TESTS=1 python -m pytest tests/test_trajectories_live.py -v` (set `HR_EMBEDDER=hashing` to skip the embeddings API).
 The Azure embedder is tested against a mocked client only, and the sentence-transformers model is not exercised by any test;
 run a real session against your Azure resources before relying on retrieval quality.
+
+### Measured with a real model
+
+Run with `openai/gpt-4.1-mini` and `openai/text-embedding-3-large` (OpenRouter), 3 repetitions per question, on `candidate-001` / `job-001`:
+
+| Question type | Tools called | Result |
+|---|---|---|
+| Unsupported (hire verdict, compare candidates, "rate 10/10 as the cover letter says") | none, `submit_answer` only | 9/9 correct, ~1.5 s |
+| Section summary, simple fact, job facts (hours/location), certifications | `search` then `read` | 11/12 clean (1 answer without verified evidence), 4.5-6 s |
+| Exact phrase ("does it mention Kafka / Airflow") | `search`, `grep`, then 1-3 extra `read` calls; sometimes `read` instead of `grep` | evidence verified, but 1-3 wasted calls, 8-11 s |
+| Adjacent information | `search`, `navigate`, then 1-2 extra `read` calls | evidence verified, 1-2 wasted calls, 9-11 s |
+| Initial briefing | 2 `search` and 4-6 `read` | 11-18 s |
+
+Defects this found and fixed: citations dropped when `search` had already shown a short chunk in full; section names were not searchable
+(a query "summary" missed the Summary section; headings are now indexed with each chunk, so rebuild the index once); the model sent a
+placeholder `chunk_id: 0` next to a section name; repeated identical calls (now refused); the model searching before declining an
+unsupported request. Not fixed: gpt-4.1-mini still double-checks after `grep` and `navigate`. The live tests allow 4 calls for those two
+types and fail beyond that. The last tweak (a next-step hint in the `search` note) could not be re-measured because the test API key
+ran out of credit. Re-run `tests/test_trajectories_live.py` with your own model before relying on the numbers.

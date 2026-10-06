@@ -93,7 +93,7 @@ class DocumentTools:
             "excluded_previously_seen": len(seen),
         }
         if hits:
-            payload["note"] = "Search hits are not citable. Use read, grep or navigate on them to get citable text."
+            payload["note"] = "Search hits are not citable. Next step: grep that document for an exact word or phrase; navigate for the chunk before/after; read for a section or a chunk's facts."
         else:
             payload["note"] = (
                 "No new matching chunks. Try different terms, or stop and state that the documents do not contain it."
@@ -173,10 +173,10 @@ class DocumentTools:
 
     # ---------------------------------------------------------------- read
     def read(self, a: ReadArgs, scope: Scope, seen: set[int]) -> ToolResult:
-        if a.chunk_id is not None:
-            origin = self._chunk(a.chunk_id, scope)
-            if not origin:
-                return ToolResult({"error": NOT_FOUND})
+        origin = self._chunk(a.chunk_id, scope) if a.chunk_id is not None else None
+        if a.chunk_id is not None and not origin and not (a.document_id and a.page_or_section):
+            return ToolResult({"error": NOT_FOUND})
+        if origin:  # chunk mode; a stray placeholder chunk_id next to document+section falls back to section mode
             chunks = self.store.document_chunks(origin["document_id"])
             pos = next(i for i, c in enumerate(chunks) if c["chunk_id"] == origin["chunk_id"])
             window = chunks[max(0, pos - min(a.before, 5)): pos + min(a.after, 5) + 1]

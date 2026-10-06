@@ -2,6 +2,8 @@
 
 * ``azure``: Azure OpenAI embeddings (default ``text-embedding-3-large``). Selected automatically when
   ``AZURE_OPENAI_ENDPOINT`` is set, the same switch ``llm.py`` uses for the chat model.
+* ``openai``: OpenAI or an OpenAI-compatible gateway such as OpenRouter (``OPENAI_BASE_URL``). Opt-in only; useful for
+  testing without Azure.
 * ``sentence-transformers``: a local model, downloaded once from Hugging Face (default when Azure is not configured).
 * ``hashing``: dependency-free feature hashing. Weak semantically, but deterministic and offline;
   used by the tests and as an explicit opt-in (``HR_EMBEDDER=hashing``) when no model is available.
@@ -76,7 +78,34 @@ class SentenceTransformerEmbedder:
         return np.asarray(vectors, dtype=np.float32)
 
 
-class AzureOpenAIEmbedder:
+class _RemoteEmbedder:
+    """Shared behaviour of the API-based embedders: read the vector size from the first response, validate the
+    response shape and L2-normalise. Subclasses create ``client`` (anything with ``embed_documents``)."""
+
+    name: str
+    dim: int
+
+    def _start(self, client, dimensions: int | None, label: str) -> None:
+        self._client = client
+        probe = self._embed_raw(["dimension probe"])
+        self.dim = int(probe.shape[1])
+        if dimensions and self.dim != int(dimensions):
+            raise RuntimeError(f"{label} returned {self.dim}-dimensional vectors but {dimensions} were requested.")
+
+    def _embed_raw(self, texts: Sequence[str]) -> np.ndarray:
+        vectors = np.asarray(self._client.embed_documents(list(texts)), dtype=np.float32)
+        if vectors.ndim != 2 or len(vectors) != len(texts):
+            raise RuntimeError(f"Unexpected embeddings response shape {vectors.shape} for {len(texts)} inputs.")
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+        return vectors / np.where(norms == 0, 1.0, norms)
+
+    def embed(self, texts: Sequence[str]) -> np.ndarray:
+        if not texts:
+            return np.zeros((0, self.dim), dtype=np.float32)
+        return self._embed_raw(texts)
+
+
+class AzureOpenAIEmbedder(_RemoteEmbedder):
     """Azure OpenAI embeddings. Configuration (environment variables):
 
     AZURE_OPENAI_ENDPOINT                 required, e.g. https://<resource>.openai.azure.com
@@ -124,25 +153,50 @@ class AzureOpenAIEmbedder:
         )
         if dimensions:
             kwargs["dimensions"] = int(dimensions)
-        self._client = AzureOpenAIEmbeddings(**kwargs)
-
-        probe = self._embed_raw(["dimension probe"])
-        self.dim = int(probe.shape[1])
-        if dimensions and self.dim != int(dimensions):
-            raise RuntimeError(f"Azure returned {self.dim}-dimensional vectors but {dimensions} were requested.")
+        self._start(AzureOpenAIEmbeddings(**kwargs), dimensions, "Azure")
         self.name = f"azure:{self.deployment}"
 
-    def _embed_raw(self, texts: Sequence[str]) -> np.ndarray:
-        vectors = np.asarray(self._client.embed_documents(list(texts)), dtype=np.float32)
-        if vectors.ndim != 2 or len(vectors) != len(texts):
-            raise RuntimeError(f"Unexpected embeddings response shape {vectors.shape} for {len(texts)} inputs.")
-        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-        return vectors / np.where(norms == 0, 1.0, norms)
 
-    def embed(self, texts: Sequence[str]) -> np.ndarray:
-        if not texts:
-            return np.zeros((0, self.dim), dtype=np.float32)
-        return self._embed_raw(texts)
+class OpenAIEmbedder(_RemoteEmbedder):
+    """OpenAI (or any OpenAI-compatible gateway such as OpenRouter) embeddings, for use without Azure.
+    Never chosen automatically: set ``HR_EMBEDDER=openai``. Configuration (environment variables):
+
+    OPENAI_API_KEY                  required
+    OPENAI_BASE_URL                 optional, e.g. https://openrouter.ai/api/v1
+    OPENAI_EMBEDDING_MODEL          default: text-embedding-3-large (on OpenRouter: openai/text-embedding-3-large)
+    OPENAI_EMBEDDING_DIMENSIONS     optional: shorten the vectors
+    """
+
+    def __init__(
+        self,
+        model: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        dimensions: int | None = None,
+    ) -> None:
+        api_key = api_key or os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("OpenAI embeddings need OPENAI_API_KEY (see .env.example).")
+        if dimensions is None and os.getenv("OPENAI_EMBEDDING_DIMENSIONS"):
+            dimensions = int(os.environ["OPENAI_EMBEDDING_DIMENSIONS"])
+        self.model = model or os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large")
+
+        from langchain_openai import OpenAIEmbeddings
+
+        kwargs: dict = dict(
+            model=self.model,
+            api_key=api_key,
+            check_embedding_ctx_length=False,  # see AzureOpenAIEmbedder: avoids a runtime tokenizer download
+            max_retries=3,
+            timeout=60,
+        )
+        base_url = base_url or os.getenv("OPENAI_BASE_URL")
+        if base_url:
+            kwargs["base_url"] = base_url
+        if dimensions:
+            kwargs["dimensions"] = int(dimensions)
+        self._start(OpenAIEmbeddings(**kwargs), dimensions, "OpenAI")
+        self.name = f"openai:{self.model}"
 
 
 def default_embedder_kind() -> str:
@@ -158,6 +212,8 @@ def get_embedder(kind: str | None = None) -> Embedder:
         return HashingEmbedder()
     if kind in ("azure", "azure-openai"):
         return AzureOpenAIEmbedder()
+    if kind == "openai":
+        return OpenAIEmbedder()
     if kind in ("sentence-transformers", "st"):
         return SentenceTransformerEmbedder(os.getenv("HR_EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2"))
-    raise ValueError(f"Unknown HR_EMBEDDER {kind!r} (use 'azure', 'sentence-transformers' or 'hashing')")
+    raise ValueError(f"Unknown HR_EMBEDDER {kind!r} (use 'azure', 'openai', 'sentence-transformers' or 'hashing')")

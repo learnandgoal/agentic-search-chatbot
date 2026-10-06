@@ -75,6 +75,15 @@ _STOP = {
 }
 
 
+INDEX_FORMAT = "2"  # 2: chunks are indexed together with their source type and heading (see index_text)
+
+
+def index_text(source_type: str, page_or_section: str, text: str) -> str:
+    """What is indexed (FTS and embedding) for a chunk: the heading and source type plus the text. The stored and
+    cited text is the plain chunk text; the heading is only there so searches can match section names."""
+    return f"{source_type} | {page_or_section}\n{text}"
+
+
 def build_fts_query(query: str) -> str:
     """Turn free text into a safe FTS5 expression: quoted tokens joined by OR."""
     tokens: list[str] = []
@@ -128,6 +137,7 @@ class HRStore:
             row = c.execute("SELECT value FROM meta WHERE key = 'embedder'").fetchone()
             if row is None:
                 c.execute("INSERT INTO meta(key, value) VALUES ('embedder', ?)", (signature,))
+                c.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('index_format', ?)", (INDEX_FORMAT,))
                 c.execute(
                     f"CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec "
                     f"USING vec0(embedding float[{int(self.embedder.dim)}] distance_metric=cosine)"
@@ -137,6 +147,13 @@ class HRStore:
                     f"Index was built with embedder '{row['value']}' but '{signature}' is configured. "
                     "Rebuild it with `python -m hr_chatbot.ingest --rebuild`."
                 )
+            else:
+                fmt = c.execute("SELECT value FROM meta WHERE key = 'index_format'").fetchone()
+                if (fmt["value"] if fmt else "1") != INDEX_FORMAT:
+                    raise IndexMismatchError(
+                        "This index was built by an older version (chunks are now indexed together with their section "
+                        "heading). Rebuild it with `python -m hr_chatbot.ingest --rebuild`."
+                    )
 
     # ------------------------------------------------------------------ writes
     def document_hash(self, document_id: str) -> str | None:
@@ -173,7 +190,8 @@ class HRStore:
                     ),
                 )
                 chunk_id = cur.lastrowid
-                c.execute("INSERT INTO chunks_fts(rowid, text) VALUES (?, ?)", (chunk_id, draft.text))
+                c.execute("INSERT INTO chunks_fts(rowid, text) VALUES (?, ?)",
+                          (chunk_id, index_text(meta["source_type"], draft.page_or_section, draft.text)))
                 c.execute("INSERT INTO chunks_vec(rowid, embedding) VALUES (?, ?)", (chunk_id, _blob(vector)))
 
     def delete_document(self, document_id: str) -> None:

@@ -252,3 +252,33 @@ def test_question_validation(env, settings):
         except ValueError:
             continue
         raise AssertionError("expected ValueError")
+
+
+JOB_DOC = "jobs/job-001/job-description.docx"
+
+
+def test_reading_a_short_chunk_that_search_already_showed_is_still_citable(env, settings):
+    """A short chunk's search snippet equals its full text. The later read must still count as citable text."""
+    def script(messages, tools, tool_choice, n):
+        if n == 1:
+            return ai(call("search", "c1", query="working hours and location", top_k=5))
+        if n == 2:
+            return ai(call("read", "c2", document_id=JOB_DOC, page_or_section="Location and working hours"))
+        chunk = last_tool_json(messages)["chunks"][0]
+        return ai(call("submit_answer", "c3", intent="qa", response="Answer.",
+                       evidence=[{"chunk_id": chunk["chunk_id"], "quote": chunk["text"][:40]}]))
+
+    out = make_session(env, settings, script)[0].ask("What are the working hours?").output
+    assert len(out["source_evidence"]) == 1 and "could not be verified" not in out["response"]
+
+
+def test_identical_repeat_calls_are_refused_not_executed(env, settings):
+    def script(messages, tools, tool_choice, n):
+        if n <= 2:
+            return ai(call("search", f"c{n}", query="kafka"))
+        return ai(call("submit_answer", "c3", intent="qa", response="Answer."))
+
+    session, _ = make_session(env, settings, script)
+    turn = session.ask("Kafka?")
+    assert [t["ok"] for t in turn.trace] == [True, False] and turn.trace[1]["duplicate"]
+    assert len(turn.output["retrieved_context"]) == len({(c["source_file"], c["page_or_section"], c["content"]) for c in turn.output["retrieved_context"]})

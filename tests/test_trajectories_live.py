@@ -32,7 +32,7 @@ def live_session(env, settings):
 def test_real_model_follows_the_query_to_tool_examples(live_session, scenario):
     turn = live_session.ask(scenario.question)
     names = [t["name"] for t in turn.trace]
-    problems = check_trajectory(scenario, names)
+    problems = check_trajectory(scenario, names, turn.trace)
     assert not problems, f"{scenario.name}: trajectory {names} -> {problems}"
     if scenario.required:
         assert turn.output["source_evidence"], f"{scenario.name}: answer had no verified evidence ({names})"

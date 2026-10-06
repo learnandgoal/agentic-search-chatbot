@@ -19,7 +19,7 @@ from .chunking import chunk_sections
 from .config import Settings, load_settings
 from .embeddings import Embedder, get_embedder
 from .parsing import ParseError, parse_file
-from .store import HRStore
+from .store import HRStore, index_text
 
 log = logging.getLogger(__name__)
 
@@ -127,13 +127,15 @@ class Ingestor:
                 report.warnings.append(
                     f"{document_id}: no extractable text (scanned PDF? OCR is not supported), indexed empty"
                 )
-            vectors = self.embedder.embed([d.text for d in drafts]) if drafts else []
+            source_type = classify_source(path.stem, kind)
+            # Embed each chunk together with its source and heading, so a query like "summary" or "required skills" can find it.
+            vectors = self.embedder.embed([index_text(source_type, d.page_or_section, d.text) for d in drafts]) if drafts else []
             self.store.replace_document(
                 {
                     "document_id": document_id,
                     "candidate_id": owner_id if is_candidate else None,
                     "job_id": None if is_candidate else owner_id,
-                    "source_type": classify_source(path.stem, kind),
+                    "source_type": source_type,
                     "source_file": path.name,
                     "content_hash": content_hash,
                 },
